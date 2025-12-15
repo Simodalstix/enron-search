@@ -33,7 +33,7 @@ public class EmailIndexer
         await pragmaCommand.ExecuteNonQueryAsync();
 
         // Prepare statements once for reuse
-        var emailInsertSql = @"INSERT INTO emails (file_path, subject, sender, recipients, date_sent, body) 
+        var emailInsertSql = @"INSERT OR IGNORE INTO emails (file_path, subject, sender, recipients, date_sent, body) 
                               VALUES (@filePath, @subject, @sender, @recipients, @dateSent, @body)";
         var termInsertSql = "INSERT OR REPLACE INTO term_index (term, email_id, frequency) VALUES (@term, @emailId, @frequency)";
         
@@ -59,9 +59,11 @@ public class EmailIndexer
         await reader.ReadLineAsync();
         
         var transaction = connection.BeginTransaction();
+        emailCommand.Transaction = transaction;
+        termCommand.Transaction = transaction;
         
         string? line;
-        while ((line = await reader.ReadLineAsync()) != null)
+        while ((line = await reader.ReadLineAsync()) != null && processed < 1_000_000)
         {
             try
             {
@@ -73,13 +75,15 @@ public class EmailIndexer
                 }
                 processed++;
                 
-                // Commit transaction every 1000 emails
+                // Commit transaction every 1000 lines
                 if (processed % 1000 == 0)
                 {
                     await transaction.CommitAsync();
                     transaction.Dispose();
                     transaction = connection.BeginTransaction();
-                    Console.WriteLine($"Processed {processed} emails");
+                    emailCommand.Transaction = transaction;
+                    termCommand.Transaction = transaction;
+                    Console.WriteLine($"Processed {processed:N0} lines");
                 }
             }
             catch (Exception ex)
@@ -92,7 +96,14 @@ public class EmailIndexer
         await transaction.CommitAsync();
         transaction.Dispose();
 
-        Console.WriteLine($"CSV indexing complete. Processed {processed} emails.");
+        if (processed >= 1_000_000)
+        {
+            Console.WriteLine($"CSV indexing stopped at limit. Processed {processed:N0} lines.");
+        }
+        else
+        {
+            Console.WriteLine($"CSV indexing complete. Processed {processed:N0} lines.");
+        }
     }
 
     private Email ParseCsvLine(string csvLine)
