@@ -48,6 +48,19 @@ public class EmailIndexer
         Console.WriteLine($"Indexing complete. Processed {processed} files.");
     }
 
+    // Direct method for CSV data - bypasses file parsing
+    public async Task IndexEmailAsync(Email email)
+    {
+        using var connection = _dbManager.CreateConnection();
+        await connection.OpenAsync();
+        
+        var emailId = await InsertEmail(connection, email);
+        if (emailId > 0) // Only index if email was actually inserted
+        {
+            await IndexEmailTerms(connection, emailId, email);
+        }
+    }
+
     private async Task ProcessEmailFile(SqliteConnection connection, string filePath)
     {
         var content = await File.ReadAllTextAsync(filePath);
@@ -59,7 +72,7 @@ public class EmailIndexer
 
     private Email ParseEmail(string content, string filePath)
     {
-        var lines = content.Split('\n');
+        var lines = content.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
         var email = new Email { FilePath = filePath };
         
         bool inHeaders = true;
@@ -96,7 +109,7 @@ public class EmailIndexer
 
     private async Task<int> InsertEmail(SqliteConnection connection, Email email)
     {
-        var sql = @"INSERT INTO emails (file_path, subject, sender, recipients, date_sent, body) 
+        var sql = @"INSERT OR IGNORE INTO emails (file_path, subject, sender, recipients, date_sent, body) 
                    VALUES (@filePath, @subject, @sender, @recipients, @dateSent, @body);
                    SELECT last_insert_rowid();";
 

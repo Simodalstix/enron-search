@@ -13,7 +13,7 @@ public class EmailSearcher
 
     public async Task SearchAsync(string query)
     {
-        var terms = query.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var terms = NormalizeTerms(query);
         
         using var connection = _dbManager.CreateConnection();
         await connection.OpenAsync();
@@ -107,5 +107,15 @@ return results;
         }
         
         return words.Length > 20 ? string.Join(" ", words[..20]) + "..." : body;
+    }
+
+    private static string[] NormalizeTerms(string query)
+    {
+        return query
+            .ToLowerInvariant()
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Select(t => t.Trim('.', ',', ';', ':', '!', '?', '"', '\''))
+            .Where(t => t.Length > 0)
+            .ToArray();
     }
 }

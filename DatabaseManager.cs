@@ -21,7 +21,7 @@ public class DatabaseManager
         var createTables = @"
             CREATE TABLE IF NOT EXISTS emails (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_path TEXT NOT NULL,
+                file_path TEXT NOT NULL UNIQUE,
                 subject TEXT,
                 sender TEXT,
                 recipients TEXT,
