@@ -14,12 +14,24 @@ public class EmailSearcher
     public async Task SearchAsync(string query)
     {
         var (terms, operation) = ParseQuery(query);
-        Console.WriteLine($"Searching for: {string.Join($" {operation} ", terms)}");
         
         using var connection = _dbManager.CreateConnection();
         await connection.OpenAsync();
-
+        
+        Console.WriteLine($"Searching for: {string.Join($" {operation} ", terms)}");
         var results = await SearchEmails(connection, terms, operation);
+        
+        // Fallback: Try misspelling tolerance if no exact results
+        if (!results.Any())
+        {
+            Console.WriteLine("No exact matches found. Trying misspelling tolerance...");
+            var expandedTerms = await TryMisspellingFallback(connection, terms);
+            if (expandedTerms.Any())
+            {
+                Console.WriteLine($"Expanded to: {string.Join(", ", expandedTerms)}");
+                results = await SearchEmails(connection, expandedTerms.ToArray(), operation);
+            }
+        }
         
         if (!results.Any())
         {
@@ -131,6 +143,34 @@ while (await reader.ReadAsync())
 }
 
 return results;
+    }
+    
+    private async Task<List<string>> TryMisspellingFallback(SqliteConnection connection, string[] terms)
+    {
+        var expandedTerms = new List<string>();
+        
+        foreach (var term in terms)
+        {
+            if (term.Length < 4) continue; // Skip very short terms
+            
+            // Try prefix matching (handles missing suffixes)
+            var prefixSql = "SELECT DISTINCT term FROM term_index WHERE term LIKE @prefix LIMIT 5";
+            using var prefixCmd = new SqliteCommand(prefixSql, connection);
+            prefixCmd.Parameters.AddWithValue("@prefix", term.Substring(0, Math.Min(term.Length - 1, term.Length)) + "%");
+            
+            using var reader = await prefixCmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                var candidate = reader.GetString(0);
+                // Simple edit distance check (1-2 character difference)
+                if (Math.Abs(candidate.Length - term.Length) <= 2)
+                {
+                    expandedTerms.Add(candidate);
+                }
+            }
+        }
+        
+        return expandedTerms.Distinct().ToList();
     }
     
     private async Task<List<(Email email, double score)>> FindRelatedEmails(SqliteConnection connection, List<Email> seedEmails)
@@ -251,6 +291,68 @@ return results;
         return words.Length > 20 ? string.Join(" ", words[..20]) + "..." : body;
     }
 
+    private async Task<string[]> FindSimilarTerms(SqliteConnection connection, string term, int maxDistance = 2)
+    {
+        // First try exact match
+        var exactSql = "SELECT term FROM term_index WHERE term = @term LIMIT 1";
+        using var exactCommand = new SqliteCommand(exactSql, connection);
+        exactCommand.Parameters.AddWithValue("@term", term);
+        using var exactReader = await exactCommand.ExecuteReaderAsync();
+        if (await exactReader.ReadAsync())
+        {
+            return new[] { term };
+        }
+        
+        // Fuzzy matching for misspellings
+        var sql = "SELECT DISTINCT term FROM term_index WHERE LENGTH(term) BETWEEN @minLen AND @maxLen LIMIT 500";
+        using var command = new SqliteCommand(sql, connection);
+        command.Parameters.AddWithValue("@minLen", Math.Max(1, term.Length - maxDistance));
+        command.Parameters.AddWithValue("@maxLen", term.Length + maxDistance);
+        
+        var candidates = new List<string>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var candidate = reader.GetString(0);
+            if (LevenshteinDistance(term, candidate) <= maxDistance)
+            {
+                candidates.Add(candidate);
+            }
+        }
+        
+        Console.WriteLine($"Debug: Found {candidates.Count} fuzzy matches for '{term}' (distance <= {maxDistance})");
+        if (candidates.Count > 0)
+        {
+            Console.WriteLine($"Debug: Matches: {string.Join(", ", candidates.Take(5))}");
+        }
+        return candidates.ToArray();
+    }
+    
+    private static int LevenshteinDistance(string s1, string s2)
+    {
+        if (s1.Length == 0) return s2.Length;
+        if (s2.Length == 0) return s1.Length;
+        
+        var matrix = new int[s1.Length + 1, s2.Length + 1];
+        
+        for (int i = 0; i <= s1.Length; i++) matrix[i, 0] = i;
+        for (int j = 0; j <= s2.Length; j++) matrix[0, j] = j;
+        
+        for (int i = 1; i <= s1.Length; i++)
+        {
+            for (int j = 1; j <= s2.Length; j++)
+            {
+                int cost = s1[i - 1] == s2[j - 1] ? 0 : 1;
+                matrix[i, j] = Math.Min(Math.Min(
+                    matrix[i - 1, j] + 1,
+                    matrix[i, j - 1] + 1),
+                    matrix[i - 1, j - 1] + cost);
+            }
+        }
+        
+        return matrix[s1.Length, s2.Length];
+    }
+    
     private (string[] terms, string operation) ParseQuery(string query)
     {
         var normalized = query.ToLowerInvariant();

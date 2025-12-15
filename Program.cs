@@ -10,7 +10,7 @@ class Program
         if (args.Length == 0)
         {
             Console.WriteLine("Usage:");
-            Console.WriteLine("  enron-search index <path>");
+            Console.WriteLine("  enron-search index <csv-file> [--time <minutes>]");
             Console.WriteLine("  enron-search search <query>");
             return 1;
         }
@@ -33,14 +33,34 @@ class Program
 
     static async Task<int> HandleIndex(string[] args)
     {
-        if (args.Length != 2)
+        if (args.Length < 2 || args.Length > 4)
         {
-            Console.WriteLine("Usage: enron-search index <csv-file>");
+            Console.WriteLine("Usage: enron-search index <csv-file> [--time <minutes>]");
             return 1;
         }
 
+        var csvFile = args[1];
+        int? timeLimit = null;
+        
+        // Parse optional --time argument
+        for (int i = 2; i < args.Length; i += 2)
+        {
+            if (args[i] == "--time" && i + 1 < args.Length)
+            {
+                if (int.TryParse(args[i + 1], out int minutes) && minutes > 0)
+                {
+                    timeLimit = minutes;
+                }
+                else
+                {
+                    Console.WriteLine("Error: --time must be a positive integer (minutes)");
+                    return 1;
+                }
+            }
+        }
+
         var indexer = new EmailIndexer();
-        await indexer.IndexCsvAsync(args[1]);
+        await indexer.IndexCsvAsync(csvFile, timeLimit);
         return 0;
     }
 
@@ -60,8 +80,12 @@ class Program
     static int ShowUsage()
     {
         Console.WriteLine("Usage:");
-        Console.WriteLine("  enron-search index <csv-file>");
+        Console.WriteLine("  enron-search index <csv-file> [--time <minutes>]");
         Console.WriteLine("  enron-search search <query>");
+        Console.WriteLine("\nExamples:");
+        Console.WriteLine("  enron-search index emails.csv --time 5    # Index for 5 minutes");
+        Console.WriteLine("  enron-search index emails.csv             # Index full dataset");
+        Console.WriteLine("  enron-search search \"fraud and investigation\"");
         return 1;
     }
 }

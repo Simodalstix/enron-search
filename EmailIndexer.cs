@@ -16,7 +16,7 @@ public class EmailIndexer
 {
     private readonly DatabaseManager _dbManager = new();
 
-    public async Task IndexCsvAsync(string csvPath)
+    public async Task IndexCsvAsync(string csvPath, int? timeLimitMinutes = null)
     {
         // Delete existing database for fresh start
         if (File.Exists("enron_search.db"))
@@ -28,7 +28,15 @@ public class EmailIndexer
         Console.WriteLine("Initializing database...");
         await _dbManager.InitializeAsync();
 
-        Console.WriteLine($"Starting CSV indexing from: {csvPath}");
+        var timeLimit = timeLimitMinutes.HasValue ? TimeSpan.FromMinutes(timeLimitMinutes.Value) : (TimeSpan?)null;
+        if (timeLimit.HasValue)
+        {
+            Console.WriteLine($"Starting CSV indexing from: {csvPath} (time limit: {timeLimitMinutes} minutes)");
+        }
+        else
+        {
+            Console.WriteLine($"Starting CSV indexing from: {csvPath} (full dataset)");
+        }
         var startTime = DateTime.Now;
         
         using var connection = _dbManager.CreateConnection();
@@ -73,6 +81,14 @@ public class EmailIndexer
         
         await foreach (var record in csv.GetRecordsAsync<CsvRecord>())
         {
+            // Check time limit
+            if (timeLimit.HasValue && DateTime.Now - startTime >= timeLimit.Value)
+            {
+                Console.WriteLine($"Time limit reached ({timeLimitMinutes} minutes). Stopping indexing.");
+                break;
+            }
+            
+            // Check record limit (fallback)
             if (processed >= 500_000) break;
             
             try

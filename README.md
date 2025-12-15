@@ -1,11 +1,52 @@
 # Enron Email Data Spelunking Tool
 
+![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![C#](https://img.shields.io/badge/C%23-239120?style=flat&logo=c-sharp&logoColor=white)
+![.NET](https://img.shields.io/badge/.NET-8.0-512BD4?style=flat&logo=dotnet&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-003B57?style=flat&logo=sqlite&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows%20%7C%20macOS-lightgrey)
+
 ## Overview
 
 This project implements a small command-line search tool for exploring the Enron email dataset.  
 It is designed as an **exploratory search system** to help investigators quickly locate potentially relevant (incriminating) emails using keyword-based queries.
 
 The focus of this implementation is **clear architecture, bounded memory usage, and explainable trade-offs**, rather than exhaustive ingestion or production-scale completeness.
+
+---
+
+## Usage
+
+### Quick Start
+```bash
+# Index emails with time limit (recommended for demos)
+dotnet run index /path/to/emails.csv --time 5
+
+# Search for emails
+dotnet run search "fraud and investigation"
+dotnet run search "skilling or lay"
+dotnet run search "investigat"  # misspelling tolerance
+```
+
+### Indexing Options
+```bash
+# Time-limited indexing (1-15 minutes)
+dotnet run index emails.csv --time 1     # Quick demo (≈33k records)
+dotnet run index emails.csv --time 5     # Medium analysis (≈168k records)
+dotnet run index emails.csv --time 10    # Deep analysis (≈336k records)
+
+# Full dataset indexing
+dotnet run index emails.csv              # Process up to 500k records
+```
+
+### Search Features
+- **Boolean Logic**: `"term1 and term2"`, `"term1 or term2"`
+- **Misspelling Tolerance**: Automatic fallback for typos
+- **Related Emails**: Shows additional emails from same senders
+- **Fast Performance**: Leverages precomputed inverted index
+
+### Dataset
+This tool is designed for the **Enron Email Dataset** available on [Kaggle](https://www.kaggle.com/datasets/wcukierski/enron-email-dataset). The CSV format (`emails.csv`) contains ~33 million rows with email metadata and content.
 
 ---
 
@@ -112,11 +153,50 @@ This satisfies the requirement that the tool can operate under constrained heap 
 ## Search Capabilities
 
 - Order-independent keyword matching
-- Basic boolean logic (`AND`, `OR`)
+- Boolean logic (`AND`, `OR`) with SQL-based implementation
 - Deterministic, explainable results
 - Fast query performance due to precomputed index
+- Related email discovery by sender correlation
+
+### Boolean Logic Implementation
+
+The search engine supports explicit AND/OR operators using a **SQL-based approach** for optimal performance:
+
+**Examples:**
+- `"fraud and investigation"` - emails containing both terms (335 results)
+- `"skilling or lay"` - emails containing either term (16,009 results)
+- `"california energy"` - space-separated terms default to OR logic
+
+**Implementation Choice: SQL vs Application-Level**
+
+**Selected: SQL-based with INTERSECT/UNION**
+- Single database query using `INTERSECT` (AND) and `UNION` (OR)
+- Leverages existing inverted index for fast term lookups
+- Database engine handles set operations efficiently
+- Scales well with query complexity
+
+**Alternative: Application-level**
+- Multiple queries with C# HashSet operations
+- Simpler logic but requires multiple database round-trips
+- Higher memory usage for large result sets
+- Slower performance for complex queries
+
+The SQL approach was chosen for production-scale performance and architectural consistency with the inverted index design.
+
+### Misspelling Tolerance Design
+
+Misspelling tolerance is implemented as a constrained fallback rather than a default behavior. Queries are first executed using exact term matches against the inverted index. If no results are returned, a limited secondary pass applies lightweight typo tolerance using SQLite-native prefix matching and small edit-distance checks over a bounded candidate set. This approach improves usability while preserving predictable performance and avoiding full vocabulary scans or custom database extensions.
+
+**Example:**
+- `"investigat"` - fallback expands to "investigation", "investigators", "investigating" (27 results)
+- Maintains <250MB memory constraint through bounded candidate sets
+- Uses SQLite LIKE operations for optimal database performance
 
 Advanced features such as ranking, stemming, fuzzy matching, and phrase search are intentionally omitted to keep behaviour predictable and scope controlled.
+
+### Query Optimization & Edge Cases
+
+Additional query optimizations were considered, including result pagination, advanced query validation, performance monitoring, NOT operators, and improved relevance ranking. However, these enhancements were deemed unnecessary for the current objectives, as the core search functionality with boolean logic and misspelling tolerance already meets the exploratory search requirements within the specified memory constraints.
 
 ---
 
