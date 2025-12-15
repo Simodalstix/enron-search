@@ -36,9 +36,7 @@ public class DatabaseManager
                 frequency INTEGER NOT NULL,
                 PRIMARY KEY (term, email_id),
                 FOREIGN KEY (email_id) REFERENCES emails(id)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_term ON term_index(term);";
+            );";
 
         using var command = new SqliteCommand(createTables, connection);
         await command.ExecuteNonQueryAsync();
