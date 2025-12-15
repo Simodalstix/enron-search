@@ -26,7 +26,8 @@ public class DatabaseManager
                 sender TEXT,
                 recipients TEXT,
                 date_sent TEXT,
-                body TEXT
+                body TEXT,
+                content_hash TEXT UNIQUE
             );
 
             CREATE TABLE IF NOT EXISTS term_index (

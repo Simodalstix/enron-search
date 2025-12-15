@@ -1,8 +1,13 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using CsvHelper;
 using Microsoft.Data.Sqlite;
 
 namespace EnronSearch;
@@ -24,6 +29,7 @@ public class EmailIndexer
         await _dbManager.InitializeAsync();
 
         Console.WriteLine($"Starting CSV indexing from: {csvPath}");
+        var startTime = DateTime.Now;
         
         using var connection = _dbManager.CreateConnection();
         await connection.OpenAsync();
@@ -33,8 +39,8 @@ public class EmailIndexer
         await pragmaCommand.ExecuteNonQueryAsync();
 
         // Prepare statements once for reuse
-        var emailInsertSql = @"INSERT OR IGNORE INTO emails (file_path, subject, sender, recipients, date_sent, body) 
-                              VALUES (@filePath, @subject, @sender, @recipients, @dateSent, @body)";
+        var emailInsertSql = @"INSERT OR IGNORE INTO emails (file_path, subject, sender, recipients, date_sent, body, content_hash) 
+                              VALUES (@filePath, @subject, @sender, @recipients, @dateSent, @body, @contentHash)";
         var termInsertSql = "INSERT OR REPLACE INTO term_index (term, email_id, frequency) VALUES (@term, @emailId, @frequency)";
         
         using var emailCommand = new SqliteCommand(emailInsertSql, connection);
@@ -47,27 +53,37 @@ public class EmailIndexer
         emailCommand.Parameters.Add("@recipients", SqliteType.Text);
         emailCommand.Parameters.Add("@dateSent", SqliteType.Text);
         emailCommand.Parameters.Add("@body", SqliteType.Text);
+        emailCommand.Parameters.Add("@contentHash", SqliteType.Text);
         
         termCommand.Parameters.Add("@term", SqliteType.Text);
         termCommand.Parameters.Add("@emailId", SqliteType.Integer);
         termCommand.Parameters.Add("@frequency", SqliteType.Integer);
 
         int processed = 0;
-        using var reader = new StreamReader(csvPath);
+        int skipped = 0;
         
-        // Skip header
-        await reader.ReadLineAsync();
+        using var reader = new StreamReader(csvPath);
+        using var csv = new CsvReader(reader, CultureInfo.InvariantCulture);
         
         var transaction = connection.BeginTransaction();
         emailCommand.Transaction = transaction;
         termCommand.Transaction = transaction;
         
-        string? line;
-        while ((line = await reader.ReadLineAsync()) != null && processed < 1_000_000)
+        await foreach (var record in csv.GetRecordsAsync<CsvRecord>())
         {
+            if (processed >= 500_000) break;
+            
             try
             {
-                var email = ParseCsvLine(line);
+                var email = ParseCsvRecord(record);
+                
+                // Apply heuristics
+                if (!ShouldIndexEmail(email))
+                {
+                    skipped++;
+                    continue;
+                }
+                
                 var emailId = await InsertEmailBatch(emailCommand, email);
                 if (emailId > 0)
                 {
@@ -75,20 +91,20 @@ public class EmailIndexer
                 }
                 processed++;
                 
-                // Commit transaction every 1000 lines
-                if (processed % 1000 == 0)
+                // Commit transaction every 10000 records
+                if (processed % 10000 == 0)
                 {
                     await transaction.CommitAsync();
                     transaction.Dispose();
                     transaction = connection.BeginTransaction();
                     emailCommand.Transaction = transaction;
                     termCommand.Transaction = transaction;
-                    Console.WriteLine($"Processed {processed:N0} lines");
+                    Console.WriteLine($"Processed {processed:N0} records, skipped {skipped:N0}");
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error processing line {processed + 1}: {ex.Message}");
+                Console.WriteLine($"Error processing record {processed + 1}: {ex.Message}");
             }
         }
         
@@ -96,70 +112,92 @@ public class EmailIndexer
         await transaction.CommitAsync();
         transaction.Dispose();
 
-        if (processed >= 1_000_000)
-        {
-            Console.WriteLine($"CSV indexing stopped at limit. Processed {processed:N0} lines.");
-        }
-        else
-        {
-            Console.WriteLine($"CSV indexing complete. Processed {processed:N0} lines.");
-        }
+        var elapsed = DateTime.Now - startTime;
+        Console.WriteLine($"CSV indexing complete. Processed {processed:N0} records, skipped {skipped:N0}.");
+        Console.WriteLine($"Time elapsed: {elapsed.TotalMinutes:F1} minutes ({processed/elapsed.TotalSeconds:F0} records/sec)");
     }
 
-    private Email ParseCsvLine(string csvLine)
+    private Email ParseCsvRecord(CsvRecord csvRecord)
     {
-        // Handle CSV with potential embedded quotes and newlines
-        if (string.IsNullOrEmpty(csvLine) || !csvLine.StartsWith("\""))
-        {
-            return new Email { FilePath = "unknown", Body = csvLine };
-        }
-
-        // Find the end of the first quoted field (file path)
-        int filePathEnd = csvLine.IndexOf("\",\"");
-        if (filePathEnd == -1)
-        {
-            return new Email { FilePath = "unknown", Body = csvLine };
-        }
-
-        var filePath = csvLine.Substring(1, filePathEnd - 1);
+        var email = new Email { FilePath = csvRecord.file };
         
-        // Message starts after "," and ends with final quote
-        var messageStart = filePathEnd + 3;
-        var message = csvLine.Length > messageStart + 1 
-            ? csvLine.Substring(messageStart, csvLine.Length - messageStart - 1)
-            : "";
+        // Parse email headers from message content
+        var lines = csvRecord.message.Split('\n');
         
-        // Extract basic fields from message
-        var email = new Email { FilePath = filePath };
+        bool inHeaders = true;
+        var bodyLines = new List<string>();
         
-        var lines = message.Split(new[] { "\\n" }, StringSplitOptions.None);
         foreach (var line in lines)
         {
-            if (line.StartsWith("Subject: "))
-                email.Subject = line[9..].Trim();
-            else if (line.StartsWith("From: "))
-                email.Sender = line[6..].Trim();
-            else if (line.StartsWith("To: "))
-                email.Recipients = line[4..].Trim();
-            else if (line.StartsWith("Date: "))
-                email.DateSent = line[6..].Trim();
+            if (inHeaders && string.IsNullOrWhiteSpace(line))
+            {
+                inHeaders = false;
+                continue;
+            }
+            
+            if (inHeaders)
+            {
+                if (line.StartsWith("Subject: "))
+                    email.Subject = line[9..].Trim();
+                else if (line.StartsWith("From: "))
+                    email.Sender = line[6..].Trim();
+                else if (line.StartsWith("To: "))
+                    email.Recipients = line[4..].Trim();
+                else if (line.StartsWith("Date: "))
+                    email.DateSent = line[6..].Trim();
+            }
+            else
+            {
+                bodyLines.Add(line);
+            }
         }
         
-        // Body is everything after headers (simplified)
-        var bodyStart = message.IndexOf("\\n\\n");
-        email.Body = bodyStart > 0 ? message.Substring(bodyStart + 4) : message;
-        
+        email.Body = string.Join(" ", bodyLines).Trim();
         return email;
+    }
+
+    private bool ShouldIndexEmail(Email email)
+    {
+        // B. Minimum Body Length Filter
+        var normalizedBody = NormalizeText(email.Body);
+        if (normalizedBody.Length < 50)
+        {
+            return false;
+        }
+        
+        return true;
+    }
+
+    private string NormalizeText(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return string.Empty;
+        
+        // A. Basic Text Normalization
+        return Regex.Replace(text.ToLowerInvariant(), @"[.,:;!?""']", "")
+                   .Trim()
+                   .Replace("  ", " "); // Collapse multiple spaces
+    }
+
+    private string ComputeContentHash(Email email)
+    {
+        // C. Exact Duplicate Detection
+        var content = NormalizeText(email.Subject) + "|" + NormalizeText(email.Body);
+        using var sha256 = SHA256.Create();
+        var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(content));
+        return Convert.ToHexString(hashBytes);
     }
 
     private async Task<int> InsertEmailBatch(SqliteCommand command, Email email)
     {
+        var contentHash = ComputeContentHash(email);
+        
         command.Parameters["@filePath"].Value = email.FilePath;
         command.Parameters["@subject"].Value = email.Subject;
         command.Parameters["@sender"].Value = email.Sender;
         command.Parameters["@recipients"].Value = email.Recipients;
         command.Parameters["@dateSent"].Value = email.DateSent;
         command.Parameters["@body"].Value = email.Body;
+        command.Parameters["@contentHash"].Value = contentHash;
 
         await command.ExecuteNonQueryAsync();
         
