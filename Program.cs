@@ -35,12 +35,12 @@ class Program
     {
         if (args.Length != 2)
         {
-            Console.WriteLine("Usage: enron-search index <path-to-emails>");
+            Console.WriteLine("Usage: enron-search index <csv-file>");
             return 1;
         }
 
         var indexer = new EmailIndexer();
-        await indexer.IndexAsync(args[1]);
+        await indexer.IndexCsvAsync(args[1]);
         return 0;
     }
 
@@ -60,7 +60,7 @@ class Program
     static int ShowUsage()
     {
         Console.WriteLine("Usage:");
-        Console.WriteLine("  enron-search index <path-to-emails>");
+        Console.WriteLine("  enron-search index <csv-file>");
         Console.WriteLine("  enron-search search <query>");
         return 1;
     }

@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -12,98 +11,76 @@ public class EmailIndexer
 {
     private readonly DatabaseManager _dbManager = new();
 
-    public async Task IndexAsync(string emailPath)
+    public async Task IndexCsvAsync(string csvPath)
     {
         Console.WriteLine("Initializing database...");
         await _dbManager.InitializeAsync();
 
-        Console.WriteLine($"Starting indexing from: {emailPath}");
+        Console.WriteLine($"Starting CSV indexing from: {csvPath}");
         
-        var files = Directory.GetFiles(emailPath, "*", SearchOption.AllDirectories)
-            .Where(f => !Path.GetFileName(f).StartsWith('.'))
-            .ToArray();
-
-        Console.WriteLine($"Found {files.Length} files to process");
-
-        int processed = 0;
         using var connection = _dbManager.CreateConnection();
         await connection.OpenAsync();
 
-        foreach (var file in files)
+        int processed = 0;
+        using var reader = new StreamReader(csvPath);
+        
+        // Skip header
+        await reader.ReadLineAsync();
+        
+        string line;
+        while ((line = await reader.ReadLineAsync()) != null)
         {
             try
             {
-                await ProcessEmailFile(connection, file);
+                var email = ParseCsvLine(line);
+                var emailId = await InsertEmail(connection, email);
+                if (emailId > 0)
+                {
+                    await IndexEmailTerms(connection, emailId, email);
+                }
                 processed++;
                 
-                if (processed % 100 == 0)
-                    Console.WriteLine($"Processed {processed}/{files.Length} files");
+                if (processed % 1000 == 0)
+                    Console.WriteLine($"Processed {processed} emails");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error processing {file}: {ex.Message}");
+                Console.WriteLine($"Error processing line {processed + 1}: {ex.Message}");
             }
         }
 
-        Console.WriteLine($"Indexing complete. Processed {processed} files.");
+        Console.WriteLine($"CSV indexing complete. Processed {processed} emails.");
     }
 
-    // Direct method for CSV data - bypasses file parsing
-    public async Task IndexEmailAsync(Email email)
+    private Email ParseCsvLine(string csvLine)
     {
-        using var connection = _dbManager.CreateConnection();
-        await connection.OpenAsync();
+        // Parse: "file","message"
+        var firstQuote = csvLine.IndexOf('"');
+        var secondQuote = csvLine.IndexOf("\",\"");
         
-        var emailId = await InsertEmail(connection, email);
-        if (emailId > 0) // Only index if email was actually inserted
-        {
-            await IndexEmailTerms(connection, emailId, email);
-        }
-    }
-
-    private async Task ProcessEmailFile(SqliteConnection connection, string filePath)
-    {
-        var content = await File.ReadAllTextAsync(filePath);
-        var email = ParseEmail(content, filePath);
+        var filePath = csvLine.Substring(firstQuote + 1, secondQuote - firstQuote - 1);
+        var message = csvLine.Substring(secondQuote + 3, csvLine.Length - secondQuote - 4);
         
-        var emailId = await InsertEmail(connection, email);
-        await IndexEmailTerms(connection, emailId, email);
-    }
-
-    private Email ParseEmail(string content, string filePath)
-    {
-        var lines = content.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+        // Extract basic fields from message
         var email = new Email { FilePath = filePath };
         
-        bool inHeaders = true;
-        var bodyLines = new List<string>();
-
+        var lines = message.Split(new[] { "\\n" }, StringSplitOptions.None);
         foreach (var line in lines)
         {
-            if (inHeaders && string.IsNullOrWhiteSpace(line))
-            {
-                inHeaders = false;
-                continue;
-            }
-
-            if (inHeaders)
-            {
-                if (line.StartsWith("Subject: "))
-                    email.Subject = line[9..].Trim();
-                else if (line.StartsWith("From: "))
-                    email.Sender = line[6..].Trim();
-                else if (line.StartsWith("To: "))
-                    email.Recipients = line[4..].Trim();
-                else if (line.StartsWith("Date: "))
-                    email.DateSent = line[6..].Trim();
-            }
-            else
-            {
-                bodyLines.Add(line);
-            }
+            if (line.StartsWith("Subject: "))
+                email.Subject = line[9..].Trim();
+            else if (line.StartsWith("From: "))
+                email.Sender = line[6..].Trim();
+            else if (line.StartsWith("To: "))
+                email.Recipients = line[4..].Trim();
+            else if (line.StartsWith("Date: "))
+                email.DateSent = line[6..].Trim();
         }
-
-        email.Body = string.Join('\n', bodyLines);
+        
+        // Body is everything after headers (simplified)
+        var bodyStart = message.IndexOf("\\n\\n");
+        email.Body = bodyStart > 0 ? message.Substring(bodyStart + 4) : message;
+        
         return email;
     }
 
