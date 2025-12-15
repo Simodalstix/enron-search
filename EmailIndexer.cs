@@ -13,6 +13,13 @@ public class EmailIndexer
 
     public async Task IndexCsvAsync(string csvPath)
     {
+        // Delete existing database for fresh start
+        if (File.Exists("enron_search.db"))
+        {
+            File.Delete("enron_search.db");
+            Console.WriteLine("Deleted existing database");
+        }
+        
         Console.WriteLine("Initializing database...");
         await _dbManager.InitializeAsync();
 
@@ -20,6 +27,30 @@ public class EmailIndexer
         
         using var connection = _dbManager.CreateConnection();
         await connection.OpenAsync();
+        
+        // Disable foreign key constraints for bulk import performance
+        using var pragmaCommand = new SqliteCommand("PRAGMA foreign_keys = OFF", connection);
+        await pragmaCommand.ExecuteNonQueryAsync();
+
+        // Prepare statements once for reuse
+        var emailInsertSql = @"INSERT INTO emails (file_path, subject, sender, recipients, date_sent, body) 
+                              VALUES (@filePath, @subject, @sender, @recipients, @dateSent, @body)";
+        var termInsertSql = "INSERT OR REPLACE INTO term_index (term, email_id, frequency) VALUES (@term, @emailId, @frequency)";
+        
+        using var emailCommand = new SqliteCommand(emailInsertSql, connection);
+        using var termCommand = new SqliteCommand(termInsertSql, connection);
+        
+        // Add parameters to prepared statements
+        emailCommand.Parameters.Add("@filePath", SqliteType.Text);
+        emailCommand.Parameters.Add("@subject", SqliteType.Text);
+        emailCommand.Parameters.Add("@sender", SqliteType.Text);
+        emailCommand.Parameters.Add("@recipients", SqliteType.Text);
+        emailCommand.Parameters.Add("@dateSent", SqliteType.Text);
+        emailCommand.Parameters.Add("@body", SqliteType.Text);
+        
+        termCommand.Parameters.Add("@term", SqliteType.Text);
+        termCommand.Parameters.Add("@emailId", SqliteType.Integer);
+        termCommand.Parameters.Add("@frequency", SqliteType.Integer);
 
         int processed = 0;
         using var reader = new StreamReader(csvPath);
@@ -27,39 +58,65 @@ public class EmailIndexer
         // Skip header
         await reader.ReadLineAsync();
         
-        string line;
+        var transaction = connection.BeginTransaction();
+        
+        string? line;
         while ((line = await reader.ReadLineAsync()) != null)
         {
             try
             {
                 var email = ParseCsvLine(line);
-                var emailId = await InsertEmail(connection, email);
+                var emailId = await InsertEmailBatch(emailCommand, email);
                 if (emailId > 0)
                 {
-                    await IndexEmailTerms(connection, emailId, email);
+                    await IndexEmailTermsBatch(termCommand, emailId, email);
                 }
                 processed++;
                 
+                // Commit transaction every 1000 emails
                 if (processed % 1000 == 0)
+                {
+                    await transaction.CommitAsync();
+                    transaction.Dispose();
+                    transaction = connection.BeginTransaction();
                     Console.WriteLine($"Processed {processed} emails");
+                }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error processing line {processed + 1}: {ex.Message}");
             }
         }
+        
+        // Commit final batch
+        await transaction.CommitAsync();
+        transaction.Dispose();
 
         Console.WriteLine($"CSV indexing complete. Processed {processed} emails.");
     }
 
     private Email ParseCsvLine(string csvLine)
     {
-        // Parse: "file","message"
-        var firstQuote = csvLine.IndexOf('"');
-        var secondQuote = csvLine.IndexOf("\",\"");
+        // Handle CSV with potential embedded quotes and newlines
+        if (string.IsNullOrEmpty(csvLine) || !csvLine.StartsWith("\""))
+        {
+            return new Email { FilePath = "unknown", Body = csvLine };
+        }
+
+        // Find the end of the first quoted field (file path)
+        int filePathEnd = csvLine.IndexOf("\",\"");
+        if (filePathEnd == -1)
+        {
+            return new Email { FilePath = "unknown", Body = csvLine };
+        }
+
+        var filePath = csvLine.Substring(1, filePathEnd - 1);
         
-        var filePath = csvLine.Substring(firstQuote + 1, secondQuote - firstQuote - 1);
-        var message = csvLine.Substring(secondQuote + 3, csvLine.Length - secondQuote - 4);
+        // Message starts after "," and ends with final quote
+        var messageStart = filePathEnd + 3;
+        var message = csvLine.Length > messageStart + 1 
+            ? csvLine.Substring(messageStart, csvLine.Length - messageStart - 1)
+            : "";
         
         // Extract basic fields from message
         var email = new Email { FilePath = filePath };
@@ -84,25 +141,24 @@ public class EmailIndexer
         return email;
     }
 
-    private async Task<int> InsertEmail(SqliteConnection connection, Email email)
+    private async Task<int> InsertEmailBatch(SqliteCommand command, Email email)
     {
-        var sql = @"INSERT OR IGNORE INTO emails (file_path, subject, sender, recipients, date_sent, body) 
-                   VALUES (@filePath, @subject, @sender, @recipients, @dateSent, @body);
-                   SELECT last_insert_rowid();";
+        command.Parameters["@filePath"].Value = email.FilePath;
+        command.Parameters["@subject"].Value = email.Subject;
+        command.Parameters["@sender"].Value = email.Sender;
+        command.Parameters["@recipients"].Value = email.Recipients;
+        command.Parameters["@dateSent"].Value = email.DateSent;
+        command.Parameters["@body"].Value = email.Body;
 
-        using var command = new SqliteCommand(sql, connection);
-        command.Parameters.AddWithValue("@filePath", email.FilePath);
-        command.Parameters.AddWithValue("@subject", email.Subject);
-        command.Parameters.AddWithValue("@sender", email.Sender);
-        command.Parameters.AddWithValue("@recipients", email.Recipients);
-        command.Parameters.AddWithValue("@dateSent", email.DateSent);
-        command.Parameters.AddWithValue("@body", email.Body);
-
-        var result = await command.ExecuteScalarAsync();
+        await command.ExecuteNonQueryAsync();
+        
+        // Get the last inserted row ID
+        using var idCommand = new SqliteCommand("SELECT last_insert_rowid()", command.Connection, command.Transaction);
+        var result = await idCommand.ExecuteScalarAsync();
         return Convert.ToInt32(result);
     }
 
-    private async Task IndexEmailTerms(SqliteConnection connection, int emailId, Email email)
+    private async Task IndexEmailTermsBatch(SqliteCommand command, int emailId, Email email)
     {
         var text = $"{email.Subject} {email.Body}".ToLowerInvariant();
         var terms = Regex.Split(text, @"\W+")
@@ -112,11 +168,9 @@ public class EmailIndexer
 
         foreach (var (term, frequency) in terms)
         {
-            var sql = "INSERT OR REPLACE INTO term_index (term, email_id, frequency) VALUES (@term, @emailId, @frequency)";
-            using var command = new SqliteCommand(sql, connection);
-            command.Parameters.AddWithValue("@term", term);
-            command.Parameters.AddWithValue("@emailId", emailId);
-            command.Parameters.AddWithValue("@frequency", frequency);
+            command.Parameters["@term"].Value = term;
+            command.Parameters["@emailId"].Value = emailId;
+            command.Parameters["@frequency"].Value = frequency;
             await command.ExecuteNonQueryAsync();
         }
     }
