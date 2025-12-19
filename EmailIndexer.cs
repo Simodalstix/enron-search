@@ -16,6 +16,9 @@ public class EmailIndexer
 {
     private readonly DatabaseManager _dbManager = new();
 
+    // Main indexing workflow: Streams CSV data, applies quality filters, builds inverted index.
+    // Supports time-limited indexing for demos and memory-constrained environments.
+    // Optimized for bulk inserts with transaction batching and deferred index creation.
     public async Task IndexCsvAsync(string csvPath, int? timeLimitMinutes = null)
     {
         // Delete existing database for fresh start
@@ -141,6 +144,9 @@ public class EmailIndexer
         Console.WriteLine($"Time elapsed: {elapsed.TotalMinutes:F1} minutes ({processed/elapsed.TotalSeconds:F0} records/sec)");
     }
 
+    // Parse raw CSV record into structured Email object.
+    // Extracts email headers (Subject, From, To, Date) and separates body content.
+    // Handles multi-line email format with header/body separation.
     private Email ParseCsvRecord(CsvRecord csvRecord)
     {
         var email = new Email { FilePath = csvRecord.file };
@@ -180,6 +186,9 @@ public class EmailIndexer
         return email;
     }
 
+    // Quality filter: Determines whether an email should be indexed.
+    // Applies minimum body length filter to skip system messages and stubs.
+    // Part of lightweight heuristics to improve index quality without complexity.
     private bool ShouldIndexEmail(Email email)
     {
         // B. Minimum Body Length Filter
@@ -192,6 +201,9 @@ public class EmailIndexer
         return true;
     }
 
+    // Text normalization: Standardizes text for consistent tokenization and hashing.
+    // Lowercases, removes punctuation, collapses whitespace.
+    // Ensures consistent term extraction across different email formats.
     private string NormalizeText(string text)
     {
         if (string.IsNullOrEmpty(text)) return string.Empty;
@@ -202,12 +214,18 @@ public class EmailIndexer
                    .Replace("  ", " "); // Collapse multiple spaces
     }
 
+    // Fast duplicate detection: Uses file path hash for deduplication.
+    // Lightweight alternative to full content hashing - trades accuracy for speed.
+    // Relies on file path uniqueness in the Enron dataset structure.
     private string ComputeContentHash(Email email)
     {
         // C. Fast duplicate detection using file path (unique per email)
         return email.FilePath.GetHashCode().ToString("X8");
     }
 
+    // Insert email record into database using prepared statement.
+    // Uses content hash for duplicate detection via UNIQUE constraint.
+    // Returns the auto-generated email ID for term indexing.
     private async Task<int> InsertEmailBatch(SqliteCommand command, Email email)
     {
         var contentHash = ComputeContentHash(email);
@@ -228,6 +246,9 @@ public class EmailIndexer
         return Convert.ToInt32(result);
     }
 
+    // Build inverted index: Extracts terms from email content and records frequencies.
+    // Creates term -> email_id mappings for fast search lookups.
+    // Filters out short terms (≤2 chars) and calculates term frequency scores.
     private async Task IndexEmailTermsBatch(SqliteCommand command, int emailId, Email email)
     {
         var text = $"{email.Subject} {email.Body}".ToLowerInvariant();

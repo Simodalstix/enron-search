@@ -11,6 +11,8 @@ public class EmailSearcher
 {
     private readonly DatabaseManager _dbManager = new();
 
+    // Main entry point: Orchestrates the search workflow including query parsing,
+    // execution, misspelling fallback, and result display
     public async Task SearchAsync(string query)
     {
         var (terms, operation) = ParseQuery(query);
@@ -74,6 +76,9 @@ public class EmailSearcher
         }
     }
 
+    // Core search engine: Executes SQL queries against the inverted index.
+    // Uses INTERSECT for AND logic, UNION for OR logic.
+    // Returns emails ranked by term frequency score.
     private async Task<List<(Email email, double score)>> SearchEmails(SqliteConnection connection, string[] terms, string operation)
     {
         if (terms.Length == 0) return new List<(Email, double)>();
@@ -145,6 +150,9 @@ while (await reader.ReadAsync())
 return results;
     }
     
+    // Misspelling tolerance: Uses prefix matching to find similar terms when exact search fails.
+    // Example: "investigat" expands to "investigation", "investigators", "investigating"
+    // Memory-safe: bounded by LIMIT clause and length constraints
     private async Task<List<string>> TryMisspellingFallback(SqliteConnection connection, string[] terms)
     {
         var expandedTerms = new List<string>();
@@ -173,6 +181,8 @@ return results;
         return expandedTerms.Distinct().ToList();
     }
     
+    // Find related emails by shared vocabulary: Returns emails that share multiple terms
+    // with the seed results. Currently unused in main search flow.
     private async Task<List<(Email email, double score)>> FindRelatedEmails(SqliteConnection connection, List<Email> seedEmails)
     {
         if (!seedEmails.Any()) return new List<(Email, double)>();
@@ -228,6 +238,8 @@ return results;
         return results;
     }
     
+    // Find related emails by sender: Returns additional emails from the same senders
+    // as the top search results. Used to show investigative context.
     private async Task<List<(Email email, double score)>> FindRelatedBySender(SqliteConnection connection, List<string> senders, List<int> excludeIds)
     {
         var sql = @"
@@ -274,6 +286,8 @@ return results;
         return results;
     }
 
+    // Generate preview snippet: Extracts 20 words centered around the first occurrence
+    // of any search term to provide context in search results.
     private string CreateSnippet(string body, string[] terms)
     {
         var words = body.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -291,6 +305,8 @@ return results;
         return words.Length > 20 ? string.Join(" ", words[..20]) + "..." : body;
     }
 
+    // Advanced fuzzy matching using Levenshtein distance.
+    // Currently unused - TryMisspellingFallback provides simpler, faster alternative.
     private async Task<string[]> FindSimilarTerms(SqliteConnection connection, string term, int maxDistance = 2)
     {
         // First try exact match
@@ -328,6 +344,8 @@ return results;
         return candidates.ToArray();
     }
     
+    // Calculate edit distance between two strings using dynamic programming.
+    // Used by FindSimilarTerms for fuzzy matching.
     private static int LevenshteinDistance(string s1, string s2)
     {
         if (s1.Length == 0) return s2.Length;
@@ -353,6 +371,9 @@ return results;
         return matrix[s1.Length, s2.Length];
     }
     
+    // Parse user query into search terms and boolean operation.
+    // Supports explicit "and"/"or" operators, defaults to OR for space-separated terms.
+    // Filters out punctuation and terms shorter than 3 characters.
     private (string[] terms, string operation) ParseQuery(string query)
     {
         var normalized = query.ToLowerInvariant();
